@@ -267,6 +267,13 @@ class WorkspacePicker(PortalCase):
 
 
 class SendAfterThePick(PortalCase):
+    def test_the_browser_send_paces_from_the_last_send_on_file(self):
+        page = PortalPage()
+        paced = []
+        with mock.patch.object(mozilib, "_pace", side_effect=paced.append):
+            self.run_send(page)
+        self.assertEqual(paced, ["browser"])
+
     def test_every_fetch_runs_after_the_workspace_is_picked(self):
         """The 2026-09-24 failure: the send posted from the picker page."""
         page = PortalPage()

@@ -30,8 +30,9 @@ cookies are domain-scoped).
 Runs on the member's own machine, where the browser has normal network. The
 setup step (mozilib.SETUP_CMD) installs Playwright and its Chromium into a
 dedicated venv, and the wrapper uses that venv's python. The fence is
-unchanged: a send still needs MOZI_SEND_OK; the browser removes the token pain,
-not the consent. The state dir, the command
+unchanged: a send still needs MOZI_SEND_OK, and paces itself from the last
+send on file like the HTTP path; the browser removes the token pain, not the
+consent. The state dir, the command
 name in messages, and the company come from the environment (mozilib.STATE_DIR,
 mozilib.CMD, MOZI_COMPANY), so this file ships as a public give unchanged.
 """
@@ -939,6 +940,9 @@ def send(question: str, *, chat_id: str | None = None,
                     f"{mozilib.CMD} login and click it")
             raise BrowserNotReady(
                 f"the browser profile is not logged in; run {mozilib.CMD} login")
+        # The same pace as the HTTP path, from the last send on file, so
+        # two sends are never closer than the floor whichever way they go.
+        mozilib._pace("browser")
         if not cid and mozilib.is_sandbar(cfg):
             create = mozilib.create_url(cfg)
             if not create:

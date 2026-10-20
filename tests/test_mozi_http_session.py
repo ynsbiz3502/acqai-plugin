@@ -213,6 +213,71 @@ class Request(StateCase):
         self.assertEqual(mozilib.extract_answer(raw, ROUTE), "hi")
 
 
+class Pacing(StateCase):
+    """One send at a time, paced from the last send on file, so the floor
+    holds across separate runs and both transports."""
+
+    def setUp(self):
+        super().setUp()
+        mozilib._last_request = 0.0
+        self.addCleanup(setattr, mozilib, "_last_request", 0.0)
+        self.slept = []
+        for p in (mock.patch.object(mozilib.time, "sleep", side_effect=self.slept.append),
+                  mock.patch.object(mozilib.random, "uniform", return_value=20.0),
+                  mock.patch.dict(os.environ, {"MOZI_MIN_DELAY": "12", "MOZI_MAX_DELAY": "30"})):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_the_first_send_waits_for_nothing_and_is_stamped(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            mozilib._pace("HTTP")
+        self.assertEqual(self.slept, [])
+        last = mozilib.last_send()
+        self.assertAlmostEqual(last["at"], time.time(), delta=2)
+        self.assertEqual(last["transport"], "HTTP")
+        self.assertIsNone(last["ok"])
+
+    def test_a_send_five_seconds_after_the_last_on_file_waits_the_rest(self):
+        mozilib._write_last_send({"at": time.time() - 5, "ok": True})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            mozilib._pace("browser")
+        self.assertEqual(len(self.slept), 1)
+        self.assertAlmostEqual(self.slept[0], 15.0, delta=1)
+        self.assertIn("pacing 15s", err.getvalue())
+        self.assertEqual(mozilib.last_send()["transport"], "browser")
+
+    def test_a_send_long_after_the_last_waits_for_nothing(self):
+        mozilib._write_last_send({"at": time.time() - 100, "ok": True})
+        with contextlib.redirect_stderr(io.StringIO()):
+            mozilib._pace("HTTP")
+        self.assertEqual(self.slept, [])
+
+    def test_the_later_of_the_file_and_this_process_counts(self):
+        mozilib._write_last_send({"at": time.time() - 100, "ok": True})
+        mozilib._last_request = time.monotonic() - 2
+        with contextlib.redirect_stderr(io.StringIO()):
+            mozilib._pace("HTTP")
+        self.assertEqual(len(self.slept), 1)
+        self.assertAlmostEqual(self.slept[0], 18.0, delta=1)
+
+    def test_the_http_ask_paces_once_for_create_and_post(self):
+        self.save(cookie(AEGIS, "tok"))
+        paced = []
+        with mock.patch.dict(os.environ, {"MOZI_SEND_OK": "1"}), \
+                mock.patch.object(mozilib, "endpoint", return_value=ROUTE), \
+                mock.patch.object(mozilib, "CHAT_ID_FILE", self.state / "chat-id"), \
+                mock.patch.object(mozilib, "_pace", side_effect=paced.append), \
+                mock.patch.object(mozilib, "_request", side_effect=[
+                    (200, b'{"id": "c9"}'),
+                    (200, b'data: {"type":"text","text":"A"}\n'
+                          b'data: {"type":"finish","finishReason":"stop"}\n')]), \
+                contextlib.redirect_stderr(io.StringIO()):
+            answer, chat = mozilib.ask("Q")
+        self.assertEqual(answer, "A")
+        self.assertEqual(paced, ["HTTP"], "one pace for the chat create and the post")
+
+
 class SendFallsBack(StateCase):
     """send tries HTTP first and goes to the browser only when HTTP has no
     session. Both transports are fakes here."""

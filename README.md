@@ -153,7 +153,7 @@ and no folder at all still works: Claude sends your question on its own.
 ## The rules
 
 - **Your yes before anything leaves.** The script asks before it sends, and Claude asks you before it runs the script. `/acq -y` is one yes for the first question and its follow-ups in that run, not a silent batch.
-- **One question at a time on the wire.** The script paces itself.
+- **One question at a time on the wire.** The script paces itself, 12 to 30 seconds between sends, measured from the last send on file, so the gap holds across separate runs and whichever way a send goes.
 - **Your account, your use.** It does what you would do by hand, in your own browser, for yourself.
 - **Chat only.** It never posts to the community.
 - **Private things stay home.** Client names, call transcripts, anything you call private. Claude leaves them out, and you see the question before it goes. Names you add to the private list are checked on every send. When a question includes one, the send stops before it goes out.
@@ -266,7 +266,7 @@ Config, all optional:
 | `ACQAI_ANSWERS_DIR` | `<state>/answers` | Where the answer files go, say a folder inside a project. The `answers_dir` install option sets the same thing. |
 | `MOZI_COMPANY` | (saved by `setup --company`) | The company to click on the sign-in list: its name, or its id (`acq.clients.company.…`). |
 | `MOZI_BASE` | (learned route, else portal) | Override the app origin. Prefer `login` / `login-legacy`. Re-run login after switching. |
-| `MOZI_MIN_DELAY`, `MOZI_MAX_DELAY` | `12`, `30` | Seconds between sends, a random gap in that range. |
+| `MOZI_MIN_DELAY`, `MOZI_MAX_DELAY` | `12`, `30` | Seconds between sends, a random gap in that range, measured from the last send on file (`last-send.json`) on either transport. |
 | `MOZI_SEND_OK` | (unset) | `1` gives the yes for the whole shell. `-y` gives it for one send, which is the better habit. |
 | `MOZI_TOKEN` | (unset) | Overrides the saved login on the HTTP path: the whole Cookie header from a signed-in request. Not needed; the login's cookies are read from `storage-state.json`. A captured legacy Clerk cookie dies in about a minute. |
 | `ACQAI_LOGIN_WAIT` | `600` | How long `login` waits for you, in seconds. |

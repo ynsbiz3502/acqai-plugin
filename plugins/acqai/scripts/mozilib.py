@@ -623,19 +623,34 @@ def session_expiry() -> int | None:
         return None
 
 
-def _pace() -> None:
-    """One request at a time, a long jittered gap. A send channel to a paid
-    service earns a slower floor than the reader (default 12-30s)."""
+def _pace(transport: str = "HTTP") -> None:
+    """One send at a time, a long jittered gap between them (default 12-30s):
+    a send channel to a paid service earns a slower floor than a reader.
+    Each transport calls this once, right before it posts a question. The
+    gap is measured from the last send on file (last-send.json), so it
+    holds across separate runs and across both transports, and from the
+    last send in this process, whichever is later. Then the send is
+    stamped as started, so the next one paces from it even when this one
+    fails partway."""
     global _last_request
     lo = _int_env("MOZI_MIN_DELAY", 12, 8, 120)
     hi = max(lo, _int_env("MOZI_MAX_DELAY", 30, 8, 300))
+    since = None
     if _last_request:
-        wait = random.uniform(lo, hi) - (time.monotonic() - _last_request)
+        since = time.monotonic() - _last_request
+    last = last_send().get("at")
+    if isinstance(last, (int, float)) and last > 0:
+        on_file = time.time() - last
+        if on_file >= 0 and (since is None or on_file < since):
+            since = on_file
+    if since is not None:
+        wait = random.uniform(lo, hi) - since
         if wait > 0:
             print(f"acqai: pacing {wait:.0f}s before Mozi send…",
                   file=sys.stderr, flush=True)
             time.sleep(wait)
     _last_request = time.monotonic()
+    mark_send_start(transport)
 
 
 def require_cookie_header() -> str:
@@ -672,7 +687,6 @@ def _request(method: str, url: str, *, body: bytes | None = None,
         headers["Content-Type"] = content_type
     req = urllib.request.Request(url, data=body, method=method, headers=headers)
     host = app_host(url)
-    _pace()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
@@ -1288,6 +1302,8 @@ def ask(question: str, *, chat_id: str | None = None,
             f"the login cookie on file has expired ({session_expires_text()}); "
             f"{CMD} login saves a fresh one")
     created = False
+    # One pace per question: the chat create and the post are one send.
+    _pace("HTTP")
     if not cid and is_sandbar(cfg):
         print("acqai: creating portal chat…", file=sys.stderr, flush=True)
         cid = create_chat(question, timeout=min(60, timeout))
