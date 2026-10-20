@@ -401,6 +401,47 @@ def stored_cookie_header(host: str | None = None) -> str:
     return "; ".join(f"{c['name']}={c.get('value', '')}" for c in cookies_for(host))
 
 
+# --- the last send: when it was posted, and how it ended ---------------------
+def last_send() -> dict:
+    """What last-send.json holds: `at`, when the last send was posted (epoch
+    seconds); `ended`, when it ended; `ok`, True, False, or None while it
+    runs; `transport`; and `error`, the reason when it failed. Empty when no
+    send has been recorded."""
+    try:
+        data = json.loads(LAST_SEND_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_last_send(data: dict) -> None:
+    try:
+        LAST_SEND_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = LAST_SEND_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(LAST_SEND_FILE)
+    except OSError as err:
+        print(f"acqai: last-send record skipped ({err})", file=sys.stderr,
+              flush=True)
+
+
+def mark_send_start(transport: str) -> None:
+    """A send is about to post: stamp it, so the next send paces from it
+    even when this one ends in an error."""
+    _write_last_send({"at": time.time(), "ended": None, "ok": None,
+                      "transport": transport, "error": ""})
+
+
+def record_send(ok: bool, transport: str, error: str = "") -> None:
+    """How the send ended. ready reads this: a login that answered a send
+    in the last week needs no browser check, and one that failed does."""
+    data = last_send()
+    data.update({"ended": time.time(), "ok": bool(ok), "transport": transport,
+                 "error": " ".join((error or "").split())[:300]})
+    data.setdefault("at", data["ended"])
+    _write_last_send(data)
+
+
 def cookie_header() -> str:
     """The whole Cookie header: MOZI_TOKEN when set, else the cookies the
     browser login saved, for the app's host."""

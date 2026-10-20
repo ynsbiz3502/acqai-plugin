@@ -16,7 +16,9 @@ own docs as the context, one paced question at a time, each one on your yes.
                                       is missing, the sign-in window when the
                                       saved login is out, then the route and the
                                       chat the next send continues (--dry-run
-                                      names what it would run and runs nothing)
+                                      names what it would run and runs nothing;
+                                      --check opens the headless browser check
+                                      even when the saved login looks fresh)
   acqai.py send "question" [-y]       one question, one answer (asks y/N first)
   acqai.py send --file PATH [-y]      the question from a file (- for stdin)
   acqai.py send ["note"] --paste [-y] the question from the clipboard, after an
@@ -734,6 +736,8 @@ def cmd_probe(rest: list) -> int:
         f"state:      {mozilib.STATE_DIR}",
         f"playwright: {pw}",
         f"login:      {signed}",
+        f"cookie:     {_cookie_row()}",
+        f"last send:  {_last_send_row()}",
         f"company:    {company or 'none set (click it in the window, or setup --company NAME)'}",
         f"route:      {cfg.get('url') or 'not learned yet: send one message in the login window'}",
         f"chat:       {cid if cid else 'none (the next send starts a new conversation)'}",
@@ -742,7 +746,7 @@ def cmd_probe(rest: list) -> int:
     ]
     why = mozilib.chat_mismatch(cid, cfg)
     if why:
-        rows.insert(6, f"next send:  NOT ready: {why}")
+        rows.insert(8, f"next send:  NOT ready: {why}")
     if session:
         try:
             import mozi_browser
@@ -754,17 +758,66 @@ def cmd_probe(rest: list) -> int:
     return 0
 
 
+# A saved login counts as fresh, and skips the headless browser check, while
+# its cookie has this long left and a send answered this recently.
+FRESH_COOKIE_S = 24 * 3600
+FRESH_SEND_S = 7 * 24 * 3600
+
+
+def _cookie_row() -> str:
+    """The login cookie's expiry as probe prints it, with a warning when it
+    lapses within a day, so a scheduled run can see it coming."""
+    text = mozilib.session_expires_text()
+    exp = mozilib.session_cookie_expires()
+    if exp is not None and exp - time.time() < FRESH_COOKIE_S:
+        text += f"; run {SELF} login before it lapses"
+    return text
+
+
+def _last_send_row() -> str:
+    last = mozilib.last_send()
+    if not last.get("at"):
+        return "none recorded yet"
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(last.get("ended") or last["at"]))
+    if last.get("ok") is None:
+        return f"started {when} via {last.get('transport', '?')}, not ended"
+    if last.get("ok"):
+        return f"ok {when} via {last.get('transport', '?')}"
+    return f"FAILED {when} via {last.get('transport', '?')}: {last.get('error', '')}"
+
+
+def _login_fresh() -> str:
+    """Why the saved login needs no browser check today, or "" when it does:
+    the session cookie on file has more than a day left, and the last send
+    went through within the week. A send that failed, or none on record,
+    sends ready to the headless check, where the sign-in window is opened
+    when the profile is out."""
+    exp = mozilib.session_cookie_expires()
+    if exp is None or exp - time.time() < FRESH_COOKIE_S:
+        return ""
+    last = mozilib.last_send()
+    ended = last.get("ended") or 0
+    if not last.get("ok") or not isinstance(ended, (int, float)) \
+            or time.time() - ended > FRESH_SEND_S:
+        return ""
+    return (f"{mozilib.session_expires_text()}, and the last send was "
+            f"answered {time.strftime('%Y-%m-%d %H:%M', time.localtime(ended))}")
+
+
 def cmd_ready(rest: list) -> int:
     """Everything a send needs, in order, fixing what it can. Playwright:
-    setup when it is missing. The login: a headless check of the saved
-    profile, and the sign-in window when there is none or it has expired.
-    The route: learned from one message in that window. The chat: the one
-    the next send would continue has to be on the route's app. Exit 0 with
-    the state of things once all four hold, 1 on the first that does not
-    hold and cannot be fixed here. --dry-run names what it would run and
-    runs nothing, browser included."""
+    setup when it is missing. The login: the cookie on file when it is
+    fresh and the last send went through (no browser opens), else a
+    headless check of the saved profile, and the sign-in window when there
+    is none or it has expired. The route: learned from one message in that
+    window. The chat: the one the next send would continue has to be on
+    the route's app. Exit 0 with the state of things once all four hold, 1
+    on the first that does not hold and cannot be fixed here. --check runs
+    the headless check even when the login looks fresh. --dry-run names
+    what it would run and runs nothing, browser included."""
     dry = "--dry-run" in rest
-    rest = [a for a in rest if a != "--dry-run"]
+    check = "--check" in rest
+    rest = [a for a in rest if a not in ("--dry-run", "--check")]
     company = _flag_value(rest, "--company")
     flags = ["--company", company] if company else []
     would: list[str] = []
@@ -779,21 +832,25 @@ def cmd_ready(rest: list) -> int:
                 return code
     elif company:
         mozilib.save_config(company=company)
-    if not dry:
-        # The session check drives the browser, so from here the run sits
-        # under the venv when that is where Playwright lives.
-        code = _under_venv(["ready", *flags])
-        if code is not None:
-            return code
     import mozi_browser
     out = ""
     if not mozi_browser.STATE_FILE.is_file():
         out = "no login saved yet"
     elif not dry:
-        try:
-            mozi_browser.require_session()
-        except mozilib.MoziError as err:
-            out = str(err)
+        fresh = "" if check else _login_fresh()
+        if fresh:
+            _say(f"login: {fresh}; no browser check needed")
+        else:
+            # The session check drives the browser, so from here the run
+            # sits under the venv when that is where Playwright lives, and
+            # the child checks rather than decide again.
+            code = _under_venv(["ready", *flags, "--check"])
+            if code is not None:
+                return code
+            try:
+                mozi_browser.require_session()
+            except mozilib.MoziError as err:
+                out = str(err)
     if out:
         if dry:
             would.append(f"login: {out}")
@@ -847,6 +904,7 @@ def _transport_label(http: bool, browser: bool) -> str:
 
 def _file_and_report(message: str, answer: str, cid: "str | None",
                      transport: str, argv: list, **kw) -> int:
+    mozilib.record_send(True, transport)
     print(answer)
     path = _file_exchange(message, answer, cid, transport, argv, **kw)
     _say(f"answer on file: {path}")
@@ -860,6 +918,7 @@ def _send_failed(err: Exception, message: str, transport: str, argv: list,
     if isinstance(err, mozilib.MoziConsent):
         _say(str(err))
         return 3
+    mozilib.record_send(False, transport, str(err))
     if isinstance(err, mozilib.MoziBlocked):
         _say(f"stopped ({err}).")
         return 1

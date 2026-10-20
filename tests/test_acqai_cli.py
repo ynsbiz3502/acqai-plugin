@@ -465,6 +465,8 @@ class Ready(CliCase):
                 mock.patch.object(acqai, "ANSWERS", self.answers), \
                 mock.patch.object(mozi_browser, "STATE_FILE", self.profile), \
                 mock.patch.object(mozi_browser, "require_session", check), \
+                mock.patch.object(mozilib, "STORAGE_STATE_FILE", self.profile), \
+                mock.patch.object(mozilib, "LAST_SEND_FILE", self.state / "last-send.json"), \
                 mock.patch.object(mozilib, "endpoint", return_value=route), \
                 mock.patch.object(mozilib, "load_chat_id", return_value=chat), \
                 contextlib.redirect_stdout(out), \
@@ -482,7 +484,7 @@ class Ready(CliCase):
         self.assertEqual(calls["checked"], 1, "the saved session is checked")
         self.assertEqual(calls["setup"], [])
         self.assertEqual(calls["login"], [])
-        self.assertEqual(calls["hop"], [["ready"]])
+        self.assertEqual(calls["hop"], [["ready", "--check"]])
 
     def test_no_login_saved_opens_the_window(self):
         code, out, err, calls = self.ready()
@@ -502,11 +504,67 @@ class Ready(CliCase):
         self.assertIn("sign-in page", err)
         self.assertIn("ready: ask with", out)
 
+    def fresh_login(self, *, days_left: float = 5, sent_ok=True,
+                    sent_days_ago: float = 1):
+        import time
+        self.profile.write_text(json.dumps({"cookies": [{
+            "name": "__Secure-aegis-external.session_token", "value": "tok",
+            "domain": ".acquisition.com", "path": "/",
+            "expires": time.time() + days_left * 86400}], "origins": []}),
+            encoding="utf-8")
+        record = self.state / "last-send.json"
+        if sent_ok is None:
+            if record.exists():
+                record.unlink()
+            return
+        ended = time.time() - sent_days_ago * 86400
+        record.write_text(json.dumps({
+            "at": ended - 20, "ended": ended, "ok": sent_ok,
+            "transport": "HTTP", "error": "" if sent_ok else "401"}),
+            encoding="utf-8")
+
+    def test_a_fresh_cookie_and_a_recent_send_skip_the_browser_check(self):
+        self.fresh_login()
+        code, out, err, calls = self.ready()
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(calls["checked"], 0, "no browser opens")
+        self.assertEqual(calls["hop"], [], "and no venv hop is needed")
+        self.assertEqual(calls["login"], [])
+        self.assertIn("no browser check needed", err)
+        self.assertIn("cookie:     login cookie expires", out)
+        self.assertIn("days left", out)
+        self.assertIn("last send:  ok", out)
+        self.assertIn("ready: ask with", out)
+
+    def test_a_cookie_about_to_lapse_or_a_stale_send_gets_the_check(self):
+        for kw in ({"days_left": 0.5}, {"sent_days_ago": 8},
+                   {"sent_ok": False}, {"sent_ok": None}):
+            with self.subTest(**kw):
+                self.fresh_login(**kw)
+                code, out, err, calls = self.ready()
+                self.assertEqual(code, 0, out + err)
+                self.assertEqual(calls["checked"], 1, "the saved session is checked")
+                self.assertEqual(calls["hop"], [["ready", "--check"]])
+        self.fresh_login(days_left=0.5)
+        code, out, err, calls = self.ready()
+        self.assertIn("hours left); run", out)
+        self.assertIn("login before it lapses", out)
+        self.fresh_login(sent_ok=False)
+        code, out, err, calls = self.ready()
+        self.assertIn("last send:  FAILED", out)
+
+    def test_check_forces_the_browser_check(self):
+        self.fresh_login()
+        code, out, err, calls = self.ready("--check")
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(calls["checked"], 1)
+        self.assertEqual(calls["hop"], [["ready", "--check"]])
+
     def test_missing_playwright_runs_setup_and_carries_the_company(self):
         code, out, err, calls = self.ready("--company", "Acme", playwright=False)
         self.assertEqual(code, 0, out + err)
         self.assertEqual(calls["setup"], [["--company", "Acme"]])
-        self.assertEqual(calls["hop"], [["ready", "--company", "Acme"]])
+        self.assertEqual(calls["hop"], [], "no login to check before the window")
         self.assertEqual(calls["login"], [["--company", "Acme"]])
 
     def test_a_route_never_learned_is_the_stop(self):
