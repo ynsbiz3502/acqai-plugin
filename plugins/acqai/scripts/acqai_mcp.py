@@ -22,9 +22,11 @@ raises that. So a call returns inside CAP_S. ready, login, and a live send can
 take longer: setup installs Playwright, the sign-in window waits for the
 member, and an answer can take two minutes. Each of those starts a job and
 returns when it ends or at the cap, whichever comes first, and the wait tool
-picks the job up again. A job runs in a session of its own, so a send under
-way when the chat closes still files its answer. One job runs at a time,
-because each one opens the same browser profile. A job lives in
+picks the job up again. A job runs in a session of its own (on Windows, a
+detached process group of its own), so a send under way when the chat closes
+still files its answer. One job runs at a time, because each one opens the
+same browser profile, and a job from an earlier server still counts while its
+pid runs (on Windows the pid is probed through OpenProcess). A job lives in
 <state>/jobs/<id>/ and is cleared a day after it ends, and the question a send
 carries is deleted from there once the send ends (the answer's file keeps it).
 
@@ -402,7 +404,7 @@ def _run_now(argv: list, stdin_text: "str | None" = None) -> tuple:
             stdin=None if stdin_text is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             encoding="utf-8", errors="replace", env=_env(), cwd=_cwd(),
-            timeout=CAP_S, start_new_session=True)
+            timeout=CAP_S, **_detached())
     except subprocess.TimeoutExpired:
         return f"acqai {argv[0]} did not end within {CAP_S} seconds.", True
     keep = "head" if argv[0] == "show" else "tail"
@@ -422,18 +424,55 @@ def _exit_code(d: pathlib.Path) -> "int | None":
         return None
 
 
+def _pid_alive(pid: int) -> bool:
+    """True while a process with this pid runs. On Windows os.kill ends a
+    process rather than probe it, so the probe opens a handle and asks for
+    the exit code: STILL_ACTIVE (259) means it runs. A pid that cannot be
+    opened is not ours to wait on."""
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+    import ctypes
+    kernel32 = ctypes.windll.kernel32
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False
+    try:
+        code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return False
+        return code.value == STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _alive(job: str, d: pathlib.Path) -> bool:
+    """True while the job's process runs: the one this server started, or
+    one an earlier server started, found by the pid on file. A job that
+    ended without an exit code (killed) reads as dead, so the next job can
+    open the browser profile."""
     proc = _PROCS.get(job)
     if proc is not None:
         return proc.poll() is None
-    if os.name == "nt":
-        # os.kill ends a process on Windows rather than probing it.
-        return False
     try:
-        os.kill(int((d / "pid").read_text().strip()), 0)
+        return _pid_alive(int((d / "pid").read_text().strip()))
     except (OSError, ValueError):
         return False
-    return True
+
+
+def _detached() -> dict:
+    """Popen keywords that put a job in a session of its own, so it outlives
+    this server: a new session on POSIX, and on Windows a new process group
+    with no console, out of this server's job object where that is allowed."""
+    if os.name != "nt":
+        return {"start_new_session": True}
+    flags = (subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS)
+    return {"creationflags": flags}
 
 
 def _all_jobs() -> list:
@@ -485,10 +524,26 @@ def _start(argv: list, stdin_text: "str | None" = None) -> str:
         fd = os.open(d / "stdin.txt", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(stdin_text)
-    proc = subprocess.Popen(
-        [sys.executable, str(SCRIPT), "run-job", str(d)],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL, env=_env(), start_new_session=True)
+    kwargs = _detached()
+    if os.name == "nt":
+        # Out of this server's job object too, when the job allows it, so
+        # the host closing the server does not take the send with it.
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, str(SCRIPT), "run-job", str(d)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, env=_env(),
+                creationflags=kwargs["creationflags"]
+                | subprocess.CREATE_BREAKAWAY_FROM_JOB)
+        except OSError:
+            proc = None
+    else:
+        proc = None
+    if proc is None:
+        proc = subprocess.Popen(
+            [sys.executable, str(SCRIPT), "run-job", str(d)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, env=_env(), **kwargs)
     _PROCS[job] = proc
     (d / "pid").write_text(str(proc.pid), encoding="utf-8")
     return job

@@ -188,9 +188,15 @@ AI.
 **Where is my login kept?** In `~/.config/acqai/browser-profile`, on your
 computer. Delete that folder to sign out.
 
-**Will it work on Windows or Linux?** It was built and is used on a Mac.
-Playwright runs on all three, so the pieces are there, and nobody has run it
-on the other two yet. If you do, say how it went.
+**Will it work on Windows or Linux?** It was built on a Mac and runs on
+Windows 11 too (the jobs detach into a process group of their own there, and
+a job from an earlier server is found by its pid). Playwright runs on all
+three. One thing to check on Windows: the plugin starts its connector with
+`python3`, and a plugin cannot fall back to another name, so `python3` has
+to resolve on your PATH. The Microsoft Store Python and the python.org
+installer both provide it; if `python3` opens the Store instead of Python,
+turn off its App execution alias under Settings → Apps → Advanced app
+settings → App execution aliases, and install Python 3.9 or newer.
 
 **The sign-in window showed a list of companies.** Click yours. To have it
 clicked for you next time: `acqai.py setup --company "Your Company"`.

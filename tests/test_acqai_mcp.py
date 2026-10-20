@@ -360,8 +360,9 @@ class Jobs(unittest.TestCase):
         self.assertFalse(question.exists())
 
     def test_a_job_from_an_earlier_server_counts_while_it_runs(self):
-        if os.name == "nt":
-            self.skipTest("the pid probe is POSIX only")
+        """The pid on file is probed on every platform (on Windows through
+        OpenProcess), so a server restart does not let a second job open
+        the browser profile under a first that still runs."""
         d = self.state / "jobs" / "20260101-000000-abcd"
         d.mkdir(parents=True)
         (d / "pid").write_text(str(os.getpid()))
