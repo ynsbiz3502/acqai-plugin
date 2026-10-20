@@ -49,6 +49,30 @@ ACQAI = HERE / "acqai.py"
 PLUGIN_JSON = HERE.parent / ".claude-plugin" / "plugin.json"
 STATE_DIR = pathlib.Path(
     os.environ.get("ACQAI_STATE_DIR", "").strip() or "~/.config/acqai").expanduser()
+
+
+def _option(key: str) -> str:
+    """A plugin install option, as .mcp.json hands it to this server in
+    ACQAI_<KEY> (from ${user_config.<key>}), or as a hook would get it in
+    CLAUDE_PLUGIN_OPTION_<KEY>. "" when unset, and when the reference was
+    not substituted (a literal "${user_config.…}" is not a value)."""
+    for name in (f"ACQAI_{key}", f"CLAUDE_PLUGIN_OPTION_{key}"):
+        value = os.environ.get(name, "").strip()
+        if value and not value.startswith("${"):
+            return value
+    return ""
+
+
+def _auto_send() -> bool:
+    """True when the auto_send install option is on: the person's standing
+    yes for every send, so a tool call needs no yes of its own."""
+    return _option("AUTO_SEND").lower() in ("1", "true", "yes", "on")
+
+
+def _answers_dir() -> pathlib.Path:
+    """Where answers are kept: the answers_dir option or ACQAI_ANSWERS_DIR,
+    else answers/ under the state folder."""
+    return pathlib.Path(_option("ANSWERS_DIR") or STATE_DIR / "answers").expanduser()
 # Claude Desktop cancels a local MCP call at about 60 seconds, so every call
 # returns well inside that.
 CAP_S = 45
@@ -83,7 +107,8 @@ INSTRUCTIONS = (
     "each one. A question is one call: ask runs ready, the send, and the "
     "wait as one job and returns the answer. Call ready on its own only for "
     "a bare /acq. A live ask or send needs yes: true, which is the person's "
-    "yes for that send. ask, ready, login, and send return within 45 "
+    "yes for that send, unless the plugin's auto_send option is on, which "
+    "is their standing yes. ask, ready, login, and send return within 45 "
     "seconds. When a result ends on 'still running', call wait with its job "
     "until the result ends on an exit code.")
 
@@ -95,7 +120,8 @@ _SEND_INPUTS = {
     "question": dict(_STR, description=(
         "The whole question, with the docs that ride with it pasted in.")),
     "yes": dict(_BOOL, description=(
-        "The person said yes to this send. Required for a live send.")),
+        "The person said yes to this send. Required for a live send, unless "
+        "the plugin's auto_send option is on.")),
     "new": dict(_BOOL, description="Start a new conversation, for a new topic."),
     "continue": dict(_STR, description=(
         "Go on in the conversation an answer on file used: its file name or "
@@ -335,6 +361,17 @@ def _env() -> dict:
     env.setdefault("ACQAI_SETUP_CMD", "acqai ready")
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
+    # The install options .mcp.json hands over: a blank one, or one left as
+    # its ${user_config.…} reference, is dropped so the script sees no value.
+    for key, name in (("ANSWERS_DIR", "ACQAI_ANSWERS_DIR"),
+                      ("AUTO_SEND", "ACQAI_AUTO_SEND"),
+                      ("MOZI_COMPANY", "MOZI_COMPANY")):
+        value = env.get(name, "").strip()
+        if not value or value.startswith("${"):
+            env.pop(name, None)
+    answers = _option("ANSWERS_DIR")
+    if answers:
+        env["ACQAI_ANSWERS_DIR"] = str(_answers_dir())
     return env
 
 
@@ -342,7 +379,7 @@ def _cwd() -> str:
     """The answers folder, where every command runs. acqai.py reads a bare
     answer name as a file here before it looks it up, so a name can only
     ever find an answer."""
-    answers = STATE_DIR / "answers"
+    answers = _answers_dir()
     answers.mkdir(parents=True, exist_ok=True)
     return str(answers)
 
@@ -545,10 +582,13 @@ def _send_argv(command: str, args: dict) -> tuple:
 
 
 def _require_yes(args: dict, tool: str) -> None:
-    if not _get(args, "yes", bool):
-        raise ToolError(
-            "a live send needs the person's yes. Show them the question, and "
-            f"once they say yes (or ran /acq -y), call {tool} again with yes: true.")
+    """A live send needs yes: true, or the auto_send install option, which
+    is the person's standing yes for every send."""
+    if _get(args, "yes", bool) or _auto_send():
+        return
+    raise ToolError(
+        "a live send needs the person's yes. Show them the question, and "
+        f"once they say yes (or ran /acq -y), call {tool} again with yes: true.")
 
 
 def tool_ask(args: dict) -> tuple:

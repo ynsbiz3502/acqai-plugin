@@ -23,8 +23,21 @@
     "mozi_company": {
       "type": "string",
       "title": "Your company on ACQ AI",
-      "description": "The company name ACQ AI shows on its sign-in list, when you belong to more than one. Claude passes it to the first sign-in, and it is saved for later runs. Leave it blank to click it yourself the first time, or set it later with: acqai.py setup --company \"Your Company\".",
+      "description": "The company ACQ AI shows on its sign-in list, when you belong to more than one: its name, or its id (the data-aegis-org-id on the portal's workspace button, acq.clients.company.…). Claude passes it to the first sign-in, and it is saved for later runs. Leave it blank to click it yourself the first time, or set it later with: acqai.py setup --company \"Your Company\".",
       "sensitive": false,
+      "required": false
+    },
+    "auto_send": {
+      "type": "boolean",
+      "title": "Send without asking in chat",
+      "description": "When on, a bare /acq <task> runs as /acq -y <task>: Claude shows the question, sends it and up to two follow-ups without waiting for a yes in chat, writes the Adopt edits into your files, and records the outcome. Off, each send and the file edits wait for your yes. Turning this on is your standing yes for every send the plugin makes.",
+      "default": false,
+      "required": false
+    },
+    "answers_dir": {
+      "type": "directory",
+      "title": "Where answers are kept",
+      "description": "The folder that keeps one file per conversation with ACQ AI. Blank keeps them in ~/.config/acqai/answers. Point it inside a project to keep that project's answers with its docs (the same as setting ACQAI_ANSWERS_DIR).",
       "required": false
     }
   }

@@ -55,7 +55,8 @@ own docs as the context, one paced question at a time, each one on your yes.
 
 Everything it keeps lives in ~/.config/acqai (override with ACQAI_STATE_DIR):
 the browser profile with your login, the learned route, the current chat id,
-the venv, private-names.txt, and answers/ with one file per conversation. It reaches
+the venv, private-names.txt, and answers/ with one file per conversation
+(ACQAI_ANSWERS_DIR moves the answers, say into a project folder). It reaches
 ACQ AI and nothing else, and it never sends without your yes: y at the prompt,
 -y on the command, or MOZI_SEND_OK=1 in the environment.
 
@@ -81,7 +82,18 @@ SCRIPT = pathlib.Path(__file__).resolve()
 STATE_DIR = pathlib.Path(
     os.environ.get("ACQAI_STATE_DIR", "").strip() or "~/.config/acqai").expanduser()
 VENV = STATE_DIR / "venv"
-ANSWERS = STATE_DIR / "answers"
+
+
+def _dir_env(name: str) -> str:
+    """A folder from the environment, or "" when unset or left as an
+    unsubstituted "${…}" reference by the plugin config."""
+    value = os.environ.get(name, "").strip()
+    return "" if value.startswith("${") else value
+
+
+# One file per conversation. ACQAI_ANSWERS_DIR (or the plugin's answers_dir
+# option) puts them inside a project, next to the docs they came from.
+ANSWERS = pathlib.Path(_dir_env("ACQAI_ANSWERS_DIR") or STATE_DIR / "answers").expanduser()
 # One name per line, the ones a send will not carry out: clients, family,
 # anyone the member keeps private. Blank lines and # comments are skipped.
 NAMES_FILE = STATE_DIR / "private-names.txt"

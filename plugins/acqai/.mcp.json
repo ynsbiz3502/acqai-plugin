@@ -2,7 +2,12 @@
   "mcpServers": {
     "acqai": {
       "command": "python3",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/acqai_mcp.py"]
+      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/acqai_mcp.py"],
+      "env": {
+        "MOZI_COMPANY": "${user_config.mozi_company}",
+        "ACQAI_AUTO_SEND": "${user_config.auto_send}",
+        "ACQAI_ANSWERS_DIR": "${user_config.answers_dir}"
+      }
     }
   }
 }

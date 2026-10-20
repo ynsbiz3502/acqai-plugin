@@ -90,7 +90,7 @@ claude -p "ask ACQ AI what it would change first about my offer"
 
 Say what you want in plain English:
 
-- `/acq` on its own: get ready. It checks you are signed in, opens the sign-in window when you are not, and says what is next. Every ask runs the same check first — a question after `/acq` does not skip it.
+- `/acq` on its own: get ready. It checks you are signed in, opens the sign-in window when you are not, and says what is next. Every ask runs the same check first — a question after `/acq` does not skip it — but it opens no browser while your saved login is fresh.
 - "ask ACQ AI to price this offer" (with the offer doc open or named)
 - "run my landing page past ACQ AI and tell me what it would change"
 - "what would ACQ AI say about this funnel? here are the numbers"
@@ -106,10 +106,31 @@ Or from the slash command:
 
 Claude writes the question from your docs and shows it before anything is
 sent. With `-y`, that show is for the record; the flag already covered the
-send and the file edits. Each conversation is kept in `~/.config/acqai/answers/`
-as one file, so nothing is lost when the chat scrolls away. The file opens on
-the question, the best answer, and what changed, and each message below it sits
-under who sent it.
+send and the file edits. A question is one tool call (`ask`): it gets ready,
+sends over HTTP with the login your browser saved, and returns the answer,
+usually in ten to twenty seconds. The browser runs only when that login is
+refused, and it refreshes the login as it goes. Each conversation is kept in
+`~/.config/acqai/answers/` as one file, so nothing is lost when the chat
+scrolls away. The file opens on the question, the best answer, and what
+changed, and each message below it sits under who sent it.
+
+### Options at install (Plugins → acqai → Configure)
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `mozi_company` | (blank) | The company to click on ACQ AI's sign-in list: its name, or its id (`acq.clients.company.…`). |
+| `auto_send` | off | On, a bare `/acq <task>` runs as `/acq -y <task>`: no yes in chat, the Adopt edits written, the outcome recorded. Turning it on is your standing yes for every send the plugin makes. |
+| `answers_dir` | `~/.config/acqai/answers` | Where the answer files go. Point it inside a project to keep that project's answers with its docs. The same as `ACQAI_ANSWERS_DIR` in the environment. |
+
+From a terminal: `claude plugin install acqai@acqai-plugin --config auto_send=true`.
+
+### Standing context: `ACQ-CONTEXT.md`
+
+Put a file named `ACQ-CONTEXT.md` in the folder you work from: who you are,
+the offer, the numbers that do not change from question to question. Claude
+includes it, in whole, in every question it sends, so you write it once
+instead of pasting it each time. Keep client names out of it; it goes to ACQ
+AI with the question.
 
 ## What you need
 
@@ -199,6 +220,7 @@ python3 plugins/acqai/scripts/acqai.py setup --company "Your Company"
 python3 plugins/acqai/scripts/acqai.py login
 python3 plugins/acqai/scripts/acqai.py probe
 python3 plugins/acqai/scripts/acqai.py ready
+python3 plugins/acqai/scripts/acqai.py ask "What would you change first about this offer?" -y
 python3 plugins/acqai/scripts/acqai.py send "What would you change first about this offer?"
 python3 plugins/acqai/scripts/acqai.py send --file question.md -y
 python3 plugins/acqai/scripts/acqai.py send "Go deeper on point two."
@@ -213,8 +235,14 @@ python3 plugins/acqai/scripts/acqai.py answers --regroup --dry-run
 
 `ready` checks what a send needs and fixes what it can: `setup` when
 Playwright is missing, the sign-in window when the login is out, then the
-route and the chat the next send continues. `--dry-run` names the steps and
-runs nothing. `send` asks y/N before it sends. `-y` answers it. `--dry-run` shows what would
+route and the chat the next send continues. While the saved login's cookie
+has more than a day left and a send was answered in the last week, it opens
+no browser; `--check` opens the headless check anyway. `--dry-run` names the
+steps and runs nothing. `probe` prints the cookie's expiry date, so a
+scheduled run can see a lapse coming. `ask` is `ready` then `send` as one
+step. `send` goes over HTTP with the saved login, and through the browser
+only when that is refused (`--http` and `--browser` pick one). It asks y/N
+before it sends. `-y` answers it. `--dry-run` shows what would
 go out and sends nothing, and it exits 1 when a line says NOT ready. `--new`
 starts a fresh conversation, and `--continue` goes back to the one an answer on
 file used. `--why` keeps a follow-up's reason above it in that file. `--paste`
@@ -229,11 +257,12 @@ Config, all optional:
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `ACQAI_STATE_DIR` | `~/.config/acqai` | The folder that holds the login, the route, the chat id, the private names, the venv, and the answers. |
-| `MOZI_COMPANY` | (saved by `setup --company`) | The company to click on the sign-in list. |
+| `ACQAI_ANSWERS_DIR` | `<state>/answers` | Where the answer files go, say a folder inside a project. The `answers_dir` install option sets the same thing. |
+| `MOZI_COMPANY` | (saved by `setup --company`) | The company to click on the sign-in list: its name, or its id (`acq.clients.company.…`). |
 | `MOZI_BASE` | (learned route, else portal) | Override the app origin. Prefer `login` / `login-legacy`. Re-run login after switching. |
 | `MOZI_MIN_DELAY`, `MOZI_MAX_DELAY` | `12`, `30` | Seconds between sends, a random gap in that range. |
 | `MOZI_SEND_OK` | (unset) | `1` gives the yes for the whole shell. `-y` gives it for one send, which is the better habit. |
-| `MOZI_TOKEN` | (unset) | The `--http` path only: the whole Cookie header from a signed-in request. Prefer the browser path; a captured legacy Clerk cookie dies in about a minute. |
+| `MOZI_TOKEN` | (unset) | Overrides the saved login on the HTTP path: the whole Cookie header from a signed-in request. Not needed; the login's cookies are read from `storage-state.json`. A captured legacy Clerk cookie dies in about a minute. |
 | `ACQAI_LOGIN_WAIT` | `600` | How long `login` waits for you, in seconds. |
 
 ## Changelog

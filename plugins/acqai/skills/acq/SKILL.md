@@ -63,11 +63,17 @@ error and the fix, and do not answer alone.
 
 `-y` / `--yes` may sit anywhere in the arguments. Strip them from the task text before you interpret it. With no task left after stripping, run `ready` and stop (same as a bare `/acq`).
 
+**The auto_send install option.** Its value is `${user_config.auto_send}`. When that reads `true`, every `/acq <task>` runs as `/acq -y <task>`: the option is the person's standing yes, so do not wait for a yes in chat before an `ask`, write the Adopt edits, and record the outcome, as the `-y` run above says. The tools accept a send without `yes: true` then, but pass it anyway. When it reads `false`, or blank, or a placeholder, a bare `/acq <task>` is the step-by-step run.
+
 ## The loop: `/acq <task>`
 
 1. **Interpret.** Turn the task into one question ACQ AI can answer with mechanics: what to change, why it works, what it displaces. A question about the person's voice, or about a relationship, is a different kind of question. Say so, and ask what they want ACQ AI's read on.
 
 2. **Gather.** Read the docs the person points at, or the folder you are in. Build the question with the situation, the numbers, the decision, and the docs that matter, pasted in whole. Ask ACQ AI to answer in the person's own terms, to say what each recommendation rests on (their docs, its pattern library, or a guess), and to name any contradiction it sees. Ask it too, when a follow-up brings in more of the situation, to build on its last answer and say what the new detail changes.
+
+   **Standing context.** Look for a file named `ACQ-CONTEXT.md` in the working folder (the folder you are in, then the project root). When it exists, it is the person's standing business context: who they are, the offer, the numbers that do not change from question to question. Include it in every question, in whole, above the docs for this question, under a line that says it is the standing context. Do not ask the person for what it already answers, and do not send it twice in one question. A follow-up in the same conversation can leave it out, since ACQ AI has it already.
+
+   **Where answers go.** Each conversation is one file in the answers folder: `~/.config/acqai/answers` unless the `answers_dir` install option or `ACQAI_ANSWERS_DIR` points inside a project. `answers` lists that folder, and `answer` reads one file from it.
 
    What stays home: client names, call transcripts, anything the person calls private, and anything you would hesitate to read aloud to a stranger. When in doubt, ask before you include it. Names the person wants kept out every time go on a list the script checks: `names` with `action: "add"` and the names. When a question includes one of them, the send stops before it goes out.
 

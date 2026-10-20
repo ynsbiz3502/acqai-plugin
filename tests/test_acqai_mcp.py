@@ -249,6 +249,49 @@ class OverStdio(unittest.TestCase):
         self.assertNotIn("SECRET", self.text(r[5]))
         self.assertEqual(outside.read_text(), "keep me")
 
+    def test_the_install_options_reach_the_script_and_a_placeholder_does_not(self):
+        """.mcp.json hands the options over as env from ${user_config.…}. A
+        value left as that reference, or blank, is no value."""
+        with mock.patch.dict(os.environ, {
+                "ACQAI_AUTO_SEND": "${user_config.auto_send}",
+                "ACQAI_ANSWERS_DIR": "${user_config.answers_dir}",
+                "MOZI_COMPANY": ""}):
+            self.assertFalse(acqai_mcp._auto_send())
+            self.assertEqual(acqai_mcp._answers_dir(), acqai_mcp.STATE_DIR / "answers")
+            env = acqai_mcp._env()
+            for name in ("ACQAI_AUTO_SEND", "ACQAI_ANSWERS_DIR", "MOZI_COMPANY"):
+                self.assertNotIn(name, env)
+        answers = self.state / "project" / "acq-answers"
+        with mock.patch.dict(os.environ, {"ACQAI_AUTO_SEND": "true",
+                                          "ACQAI_ANSWERS_DIR": str(answers),
+                                          "MOZI_COMPANY": "Acme"}):
+            self.assertTrue(acqai_mcp._auto_send())
+            self.assertEqual(acqai_mcp._answers_dir(), answers)
+            self.assertEqual(acqai_mcp._cwd(), str(answers))
+            self.assertTrue(answers.is_dir())
+            env = acqai_mcp._env()
+            self.assertEqual(env["ACQAI_ANSWERS_DIR"], str(answers))
+            self.assertEqual(env["MOZI_COMPANY"], "Acme")
+            # auto_send is the standing yes: a live send starts without yes.
+            seen = {}
+            with mock.patch.object(acqai_mcp, "_start_and_wait",
+                                   side_effect=lambda a, stdin_text=None: (seen.setdefault("argv", a), False)):
+                acqai_mcp.tool_ask({"question": "Q"})
+                acqai_mcp.tool_send({"question": "Q"})
+            self.assertEqual(seen["argv"][-1], "-y")
+
+    def test_answers_land_in_the_answers_dir_the_option_names(self):
+        answers = self.state / "project" / "acq-answers"
+        env = dict(os.environ, ACQAI_STATE_DIR=str(self.state), HOME=str(self.state),
+                   ACQAI_ANSWERS_DIR=str(answers))
+        out = subprocess.run([sys.executable, str(SERVER)], env=env,
+                             input=json.dumps(INIT) + "\n" + json.dumps(call(1, "answers")) + "\n",
+                             capture_output=True, text=True, timeout=120)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        reply = json.loads(out.stdout.splitlines()[-1])
+        self.assertIn(str(answers), self.text(reply))
+        self.assertFalse((self.state / "answers").exists())
+
     def test_a_malformed_message_gets_an_error_and_the_server_stays_up(self):
         r = self.serve({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": [1]},
                        INIT, call(2, "send", question="Café, 30 % off ✓", dry_run=True))
