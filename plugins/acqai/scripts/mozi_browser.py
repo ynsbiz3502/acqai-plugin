@@ -563,6 +563,14 @@ def _on_org_choose(page, company: str | None = None) -> bool:
 
 def _company_locs(scope, name: str):
     locs = []
+    # The portal's workspace button carries the workspace's id in
+    # data-aegis-org-id (acq.clients.company.…), so a member can name the
+    # company by that id, which no rename on the portal can break.
+    try:
+        quoted = name.replace("\\", "\\\\").replace('"', '\\"')
+        locs.append(scope.locator(f'button[data-aegis-org-id="{quoted}"]'))
+    except Exception:
+        pass
     # The portal's workspace button holds a monogram, the name, and "Select
     # →", so its accessible name is "AC Acme Co Select →" and none of
     # the role lookups below match it. Find it by the name's own span.

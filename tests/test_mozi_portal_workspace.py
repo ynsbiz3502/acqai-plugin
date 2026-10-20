@@ -116,9 +116,20 @@ class PortalPage:
     def pick(self, name):
         self.picked = name
 
+    def org_id(self, name: str) -> str:
+        """Each workspace button's data-aegis-org-id."""
+        return "acq.clients.company." + name.lower().replace(" ", "-")
+
     def locator(self, selector):
         if selector == mozi_browser._WORKSPACE_BTN:
             return Buttons(self)
+        if selector.startswith('button[data-aegis-org-id="'):
+            wanted = selector[len('button[data-aegis-org-id="'):-2]
+            for name in self.workspaces:
+                if self.org_id(name) == wanted:
+                    return Loc(lambda: not self.picked,
+                               on_click=lambda n=name: self.pick(n))
+            return Loc()
         if selector == "textarea":
             return Loc(lambda: self.picked is not None)
         return Loc()
@@ -223,6 +234,20 @@ class WorkspacePicker(PortalCase):
         page = PortalPage(workspaces=("Acme Co Labs", "Acme Co"))
         self.assertTrue(mozi_browser.select_company(page, "acme co"))
         self.assertEqual(page.picked, "Acme Co")
+
+    def test_the_workspace_id_matches_its_button(self):
+        """The portal's button carries data-aegis-org-id, so the company can
+        be named by that id (acq.clients.company.…) as well as its name."""
+        page = PortalPage(workspaces=("Beta Co", "Acme Co"))
+        self.assertTrue(mozi_browser.select_company(page, page.org_id("Acme Co")))
+        self.assertEqual(page.picked, "Acme Co")
+        page = PortalPage()
+        self.assertFalse(mozi_browser.select_company(page, "acq.clients.company.nope"))
+        self.assertIsNone(page.picked)
+        page = PortalPage()
+        os.environ["MOZI_COMPANY"] = page.org_id("Beta Co")
+        self.assertTrue(mozi_browser._ensure_company(page))
+        self.assertEqual(page.picked, "Beta Co")
 
     def test_no_company_leaves_the_pick_to_the_member(self):
         os.environ.pop("MOZI_COMPANY")
