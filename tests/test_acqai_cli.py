@@ -258,15 +258,19 @@ class Paste(CliCase):
         # through `--file -`. No child runs here, and nothing reaches ACQ AI.
         path = self.answer()
         pasted = "What should I charge?"
+        # HTTP is tried here first, with no login on file, so the child goes
+        # straight to the browser.
         cases = [
             (["send", "Context first.", "--paste", "-y"], "",
-             ["send", "--file", "-"], "Context first.\n" + pasted),
+             ["send", "--file", "-", "--browser"], "Context first.\n" + pasted),
             (["send", "--paste", "-y", "--continue", path.name], "",
-             ["send", "--file", "-", "--continue", path.name], pasted),
+             ["send", "--file", "-", "--continue", path.name, "--browser"], pasted),
             (["send", "--paste", "--new", "-y"], "",
-             ["send", "--file", "-", "--new"], pasted),
+             ["send", "--file", "-", "--new", "--browser"], pasted),
             (["send", "--file", "-", "-y"], "A question from stdin",
-             ["send", "--file", "-", "-y"], "A question from stdin"),
+             ["send", "--file", "-", "-y", "--browser"], "A question from stdin"),
+            (["send", "--file", "-", "-y", "--browser"], "Browser only",
+             ["send", "--file", "-", "-y", "--browser"], "Browser only"),
         ]
         for argv, stdin, child, text in cases:
             with self.subTest(argv=argv):
@@ -281,6 +285,7 @@ class Paste(CliCase):
                         mock.patch.object(acqai, "NAMES_FILE", self.state / "private-names.txt"), \
                         mock.patch.object(acqai, "_clipboard", return_value=pasted), \
                         mock.patch.object(acqai, "_under_venv", side_effect=hop), \
+                        mock.patch.object(mozilib, "endpoint", return_value=PORTAL_ROUTE), \
                         mock.patch.object(mozilib, "clear_chat_id"), \
                         mock.patch.object(sys, "stdin", io.StringIO(stdin)), \
                         contextlib.redirect_stderr(io.StringIO()):

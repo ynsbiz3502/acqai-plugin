@@ -27,7 +27,9 @@ own docs as the context, one paced question at a time, each one on your yes.
   acqai.py send ... --continue ANSWER go on in the conversation an answer on file
                                       used (its name, a prefix of it, or its path)
   acqai.py send ... --why "LINE"      a follow-up's reason, kept above it on file
-  acqai.py send ... --http            replay MOZI_TOKEN instead of the browser
+  acqai.py send ... --http            HTTP only: the saved login's cookies (or
+                                      MOZI_TOKEN), with no browser fallback
+  acqai.py send ... --browser         the browser only, skipping HTTP
   acqai.py names                      the names a send will not carry out
   acqai.py names add|remove NAME ...  add or remove one (--dry-run shows the change)
   acqai.py outcome ANSWER             what came of an answer: adopt, suggest,
@@ -833,13 +835,59 @@ def cmd_ready(rest: list) -> int:
     return 0
 
 
+def _transport_label(http: bool, browser: bool) -> str:
+    """How the dry run names the path a send takes."""
+    if http:
+        return ("raw HTTP (MOZI_TOKEN)" if os.environ.get("MOZI_TOKEN", "").strip()
+                else "HTTP with the saved login (no browser fallback)")
+    if browser:
+        return "your browser (Playwright)"
+    return "HTTP with the saved login, then your browser if that is refused"
+
+
+def _file_and_report(message: str, answer: str, cid: "str | None",
+                     transport: str, argv: list, **kw) -> int:
+    print(answer)
+    path = _file_exchange(message, answer, cid, transport, argv, **kw)
+    _say(f"answer on file: {path}")
+    return 0
+
+
+def _send_failed(err: Exception, message: str, transport: str, argv: list,
+                 **kw) -> int:
+    """The exit code for a send the transport did not complete, with the
+    reason said and a partial answer filed."""
+    if isinstance(err, mozilib.MoziConsent):
+        _say(str(err))
+        return 3
+    if isinstance(err, mozilib.MoziBlocked):
+        _say(f"stopped ({err}).")
+        return 1
+    if isinstance(err, mozilib.MoziCutShort):
+        # Part of a reply, then an error: the send fails, and the part that
+        # came joins the conversation's file, marked where it stopped. The
+        # transport saved the chat before it read the answer.
+        print(err.partial)
+        path = _file_exchange(message, err.logged(), mozilib.load_chat_id(),
+                              transport, argv, **kw)
+        _say(str(err))
+        _say(f"partial answer on file: {path}")
+        return 1
+    _say(str(err))
+    return 1
+
+
 def cmd_send(rest: list, argv: list) -> int:
     dry = "--dry-run" in rest
     http = "--http" in rest
+    browser = "--browser" in rest
     new = "--new" in rest
     yes = any(a in ("-y", "--yes") for a in rest)
     paste = "--paste" in rest
-    rest = [a for a in rest if a not in ("--dry-run", "--http", "--new", "-y", "--yes", "--paste")]
+    rest = [a for a in rest if a not in ("--dry-run", "--http", "--browser",
+                                         "--new", "-y", "--yes", "--paste")]
+    if http and browser:
+        raise ValueError("--http and --browser each pick the transport. Pass one.")
     # --continue names an answer on file. Its chat carries the app that made
     # it, so the transport still stops before posting it to the other app.
     cont = _flag_value(rest, "--continue")
@@ -874,7 +922,7 @@ def cmd_send(rest: list, argv: list) -> int:
             shown = shown[:399].rstrip() + "…"
         rows = [
             "Would send one question to ACQ AI:",
-            f"  transport: {'raw HTTP (MOZI_TOKEN)' if http else 'your browser (Playwright)'}",
+            f"  transport: {_transport_label(http, browser)}",
             f"  to:        {cfg.get('url') or '(route not learned yet)'}",
             f"  chat:      {chat_row}",
             f"  consent:   {'given' if (yes or mozilib.send_allowed()) else 'the live run asks y/N first (-y answers it)'}",
@@ -901,58 +949,54 @@ def cmd_send(rest: list, argv: list) -> int:
     # no at the prompt keeps it.
     if new:
         mozilib.clear_chat_id()
-    if not http:
-        # `--file -` spent stdin in _message_from, and a second clipboard read
-        # could find other text. So the text goes to the child under the venv
-        # as its stdin, and its own `--file -` reads the question read and
-        # checked here. `--paste` becomes `--file -` for the child.
-        child = argv
-        if paste:
-            child = ["send", "--file", "-",
-                     *(["--continue", cont] if cont is not None else []),
-                     *(["--why", why] if why else []),
-                     *(["--new"] if new else [])]
-        stdin_text = message if paste or _file_arg(rest) == "-" else None
-        code = _under_venv(child, stdin_text=stdin_text)
-        if code is not None:
-            return code
-    transport = "HTTP" if http else "browser"
+    filing = dict(why=why, new=new, into=source if cont is not None else None)
+    if not browser:
+        # HTTP first, with the cookies the browser login saved. It needs no
+        # Playwright, so it runs right here, in this interpreter. chat is
+        # None unless --continue named one: the saved chat goes on.
+        sent_at = time.localtime()
+        try:
+            _say(f"sending via HTTP ({len(message)} characters)…")
+            answer, cid = mozilib.ask(message, chat_id=chat)
+        except mozilib.MoziNoSession as err:
+            if http:
+                return _send_failed(err, message, "HTTP", argv,
+                                    sent_at=sent_at, **filing)
+            _say(f"HTTP has no session ({err}); falling back to your browser, "
+                 "which refreshes the login…")
+        except mozilib.MoziError as err:
+            return _send_failed(err, message, "HTTP", argv, sent_at=sent_at,
+                                **filing)
+        else:
+            return _file_and_report(message, answer, cid, "HTTP", argv,
+                                    sent_at=sent_at, **filing)
+    # The browser path. `--file -` spent stdin in _message_from, and a second
+    # clipboard read could find other text. So the text goes to the child
+    # under the venv as its stdin, and its own `--file -` reads the question
+    # read and checked here. `--paste` becomes `--file -` for the child, and
+    # the child goes straight to the browser: HTTP was tried here.
+    child = list(argv)
+    if paste:
+        child = ["send", "--file", "-",
+                 *(["--continue", cont] if cont is not None else []),
+                 *(["--why", why] if why else []),
+                 *(["--new"] if new else [])]
+    if "--browser" not in child:
+        child.append("--browser")
+    stdin_text = message if paste or _file_arg(rest) == "-" else None
+    code = _under_venv(child, stdin_text=stdin_text)
+    if code is not None:
+        return code
     sent_at = time.localtime()
     try:
-        _say(f"sending via {transport} ({len(message)} characters)…")
-        # chat is None unless --continue named one: the saved chat goes on.
-        if http:
-            answer, cid = mozilib.ask(message, chat_id=chat)
-        else:
-            import mozi_browser
-            answer, cid = mozi_browser.send(message, chat_id=chat)
-    except mozilib.MoziConsent as err:
-        _say(str(err))
-        return 3
-    except mozilib.MoziBlocked as err:
-        _say(f"stopped ({err}).")
-        return 1
-    except mozilib.MoziCutShort as err:
-        # Part of a reply, then an error: the send fails, and the part that
-        # came joins the conversation's file, marked where it stopped. The
-        # transport saved the chat before it read the answer.
-        print(err.partial)
-        path = _file_exchange(message, err.logged(), mozilib.load_chat_id(),
-                              transport, argv, why=why, new=new,
-                              sent_at=sent_at,
-                              into=source if cont is not None else None)
-        _say(str(err))
-        _say(f"partial answer on file: {path}")
-        return 1
+        _say(f"sending via browser ({len(message)} characters)…")
+        import mozi_browser
+        answer, cid = mozi_browser.send(message, chat_id=chat)
     except mozilib.MoziError as err:
-        _say(str(err))
-        return 1
-    print(answer)
-    path = _file_exchange(message, answer, cid, transport, argv, why=why,
-                          new=new, sent_at=sent_at,
-                          into=source if cont is not None else None)
-    _say(f"answer on file: {path}")
-    return 0
+        return _send_failed(err, message, "browser", argv, sent_at=sent_at,
+                            **filing)
+    return _file_and_report(message, answer, cid, "browser", argv,
+                            sent_at=sent_at, **filing)
 
 
 def cmd_discover(rest: list) -> int:

@@ -272,6 +272,8 @@ class HttpSend(ChatCase):
     def setUp(self):
         super().setUp()
         os.environ["MOZI_SEND_OK"] = "1"
+        # A session to send with: ask stops with none before any request.
+        os.environ["MOZI_TOKEN"] = "__session=t"
         self.posts: list[dict] = []
 
     def post(self, _method, url, *, body=None, referer=None, **_k):

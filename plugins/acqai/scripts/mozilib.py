@@ -24,9 +24,16 @@ reachable path is each app's own internal HTTP endpoint, called with a
 captured browser session, the way Hamel Husain's reverse-eng-site-skill and
 skoollib both work.
 
-AUTH IS THE WHOLE COOKIE HEADER (MOZI_TOKEN). Portal:
-`__Secure-aegis-external.session_token` + `session_data`. Legacy: Clerk
-`__session`. Prefer the browser transport: it refreshes the session itself.
+AUTH IS A COOKIE HEADER. The default send builds it from the cookies the
+browser login saved in storage-state.json (portal Aegis:
+`__Secure-aegis-external.session_token` + `session_data`; legacy: Clerk
+`__session`), so no token has to be captured by hand. MOZI_TOKEN, the whole
+Cookie header from a signed-in request, overrides that when set. A 401 or
+403 on this path, or no usable cookie on file, is MoziNoSession, and the
+caller falls back to the browser transport, whose login refreshes
+storage-state.json. The Set-Cookie headers a reply carries are written back
+into storage-state.json so the saved session stays as fresh as the server
+keeps it.
 
 WHY THIS IS FENCED HARDER THAN THE READERS. Every other channel only reads.
 This one writes into a paid third-party account through an undocumented route,
@@ -36,18 +43,22 @@ paced, and it never sends without a per-run consent flag. It touches Mozi's own
 chat only, never the Skool community (that stays skoollib's job).
 
 Secrets, both the member's own browser session, never committed:
-  MOZI_TOKEN   the full Cookie header from a logged-in request
+  MOZI_TOKEN   the full Cookie header from a logged-in request (optional)
   MOZI_BASE    app origin (default https://portal.acquisition.com; legacy
                https://ai.acquisition.com)
 The chat route and payload shape, learned by `discover` from a Copy-as-cURL of
 a real send, land in endpoint.json under STATE_DIR (ACQAI_STATE_DIR, or
-~/.config/acqai). The saved chat sits beside it in chat-id. No secret is ever
-written there; the cookie stays in the environment.
+~/.config/acqai). The saved chat sits beside it in chat-id, and the login's
+cookies in storage-state.json, which the browser login writes and this file
+reads. The pace between sends is kept in last-send.json beside them, so the
+floor holds across separate runs and both transports.
 """
 from __future__ import annotations
 
 import base64
 import datetime
+import email.utils
+import http.cookies
 import json
 import os
 import random
@@ -68,6 +79,13 @@ STATE_DIR = Path(os.environ.get("ACQAI_STATE_DIR", "").strip()
 ENDPOINT_FILE = STATE_DIR / "endpoint.json"
 CHAT_ID_FILE = STATE_DIR / "chat-id"
 CONFIG_FILE = STATE_DIR / "config.json"  # the saved company, when env has none
+# The cookies the browser login saved (Playwright's storage_state JSON). The
+# HTTP transport reads its session from here, and writes refreshed cookies
+# back. mozi_browser keeps the same path as its STATE_FILE.
+STORAGE_STATE_FILE = STATE_DIR / "storage-state.json"
+# When the last send was posted and how it ended, so the pace between sends
+# holds across runs, and ready can tell a login that works from one to check.
+LAST_SEND_FILE = STATE_DIR / "last-send.json"
 CHAT_ID_ENV = "MOZI_CHAT_ID"  # overrides the file for one process / nested send
 # How a message names the command to run next, and the setup that installs the
 # browser. The caller names its own script in ACQAI_CMD and ACQAI_SETUP_CMD.
@@ -79,8 +97,10 @@ DEFAULT_BASE = PORTAL_BASE
 USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
               "AppleWebKit/537.36 (KHTML, like Gecko) "
               "Chrome/126.0.0.0 Safari/537.36")
-# Portal Aegis session cookie (HTTP --http path). Browser transport preferred.
+# Portal Aegis session cookie, the one the HTTP transport needs on file.
 _AEGIS_TOKEN = "__Secure-aegis-external.session_token"
+# Legacy Clerk session cookie. Its JWT lives about a minute.
+_CLERK_TOKEN = "__session"
 
 _last_request = 0.0
 
@@ -90,7 +110,18 @@ class MoziError(RuntimeError):
 
 
 class MoziBlocked(MoziError):
-    """The service said stop (401/403/429) or the session is logged out."""
+    """The service said stop (401/403/429) or the session is logged out.
+    `status` is the HTTP status that said so, or 0 when none did."""
+
+    def __init__(self, message: str, status: int = 0) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class MoziNoSession(MoziBlocked):
+    """The HTTP path has no session to send with: no cookie on file, one
+    that has expired, or one the server refused (401/403). The caller falls
+    back to the browser, whose login refreshes the cookies on file."""
 
 
 class MoziConsent(MoziError):
@@ -275,9 +306,188 @@ def save_config(**fields) -> Path:
     return CONFIG_FILE
 
 
+# --- the cookies the browser login saved -------------------------------------
+def _read_storage_state() -> dict:
+    try:
+        data = json.loads(STORAGE_STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def stored_cookies() -> list[dict]:
+    """Every cookie in storage-state.json, as Playwright saved it: name,
+    value, domain, path, expires (epoch seconds, -1 for a session cookie),
+    secure, httpOnly, sameSite. Empty when there is no file."""
+    cookies = _read_storage_state().get("cookies")
+    return [c for c in cookies if isinstance(c, dict)] if isinstance(cookies, list) else []
+
+
+def _cookie_matches(cookie: dict, host: str) -> bool:
+    """True when a cookie's domain covers this host: an exact host, or a
+    leading-dot domain the host sits under (.acquisition.com covers
+    portal.acquisition.com and ai.acquisition.com both)."""
+    domain = str(cookie.get("domain") or "").lower().lstrip(".")
+    if not domain or not host:
+        return False
+    return host == domain or host.endswith("." + domain)
+
+
+def _cookie_live(cookie: dict, now: float | None = None) -> bool:
+    """True when a cookie has not expired. A session cookie (expires -1 or
+    absent) counts as live."""
+    exp = cookie.get("expires")
+    if not isinstance(exp, (int, float)) or exp <= 0:
+        return True
+    return exp > (now if now is not None else time.time())
+
+
+def cookies_for(host: str | None = None) -> list[dict]:
+    """The live cookies on file for this host (default: the app's host)."""
+    host = (host or app_host(base()) or "").lower()
+    return [c for c in stored_cookies()
+            if c.get("name") and _cookie_matches(c, host) and _cookie_live(c)]
+
+
+def session_cookie(host: str | None = None) -> dict | None:
+    """The session cookie on file for this host, live or not: portal Aegis
+    session_token, else legacy Clerk __session. None when there is none."""
+    host = (host or app_host(base()) or "").lower()
+    found = None
+    for c in stored_cookies():
+        name = str(c.get("name") or "")
+        if not _cookie_matches(c, host) or not str(c.get("value") or ""):
+            continue
+        if name == _AEGIS_TOKEN or name.endswith("aegis-external.session_token"):
+            return c
+        if name == _CLERK_TOKEN or name.startswith(_CLERK_TOKEN + "_"):
+            found = found or c
+    return found
+
+
+def session_cookie_expires(host: str | None = None) -> float | None:
+    """When the session cookie on file expires, as epoch seconds. None when
+    there is no cookie, or it is a session cookie with no expiry."""
+    c = session_cookie(host)
+    if not c:
+        return None
+    exp = c.get("expires")
+    return float(exp) if isinstance(exp, (int, float)) and exp > 0 else None
+
+
+def session_expires_text(host: str | None = None) -> str:
+    """The cookie's expiry as a line a member reads: the date, and how far
+    off it is, or that there is none."""
+    c = session_cookie(host)
+    if not c:
+        return "no login cookie on file"
+    exp = session_cookie_expires(host)
+    if exp is None:
+        return "login cookie on file (no expiry recorded)"
+    left = exp - time.time()
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(exp))
+    if left <= 0:
+        return f"login cookie EXPIRED {when}"
+    if left < 3600:
+        return f"login cookie expires {when} ({int(left // 60)} minutes left)"
+    if left < 2 * 86400:
+        return f"login cookie expires {when} ({left / 3600:.0f} hours left)"
+    return f"login cookie expires {when} ({left / 86400:.1f} days left)"
+
+
+def stored_cookie_header(host: str | None = None) -> str:
+    """The Cookie header the live cookies on file make for this host, in
+    the order they were saved, or "" when none."""
+    return "; ".join(f"{c['name']}={c.get('value', '')}" for c in cookies_for(host))
+
+
 def cookie_header() -> str:
-    """The whole Cookie header (MOZI_TOKEN), verbatim, from the environment."""
-    return os.environ.get("MOZI_TOKEN", "").strip()
+    """The whole Cookie header: MOZI_TOKEN when set, else the cookies the
+    browser login saved, for the app's host."""
+    env = os.environ.get("MOZI_TOKEN", "").strip()
+    return env or stored_cookie_header()
+
+
+def _parse_set_cookie(header: str, host: str) -> dict | None:
+    """One Set-Cookie header as a storage-state cookie, or None when it has
+    no name. Domain and path default the way a browser defaults them for
+    the request host. Max-Age wins over Expires, as in a browser."""
+    try:
+        jar = http.cookies.SimpleCookie()
+        jar.load(header)
+    except http.cookies.CookieError:
+        return None
+    for name, morsel in jar.items():
+        out = {"name": name, "value": morsel.value,
+               "domain": (morsel["domain"] or host).lower(),
+               "path": morsel["path"] or "/",
+               "expires": -1,
+               "httpOnly": bool(morsel["httponly"]),
+               "secure": bool(morsel["secure"]),
+               "sameSite": (morsel["samesite"] or "Lax").capitalize()}
+        if morsel["domain"] and not out["domain"].startswith("."):
+            out["domain"] = "." + out["domain"]
+        max_age = morsel["max-age"]
+        if max_age:
+            try:
+                out["expires"] = int(time.time()) + int(max_age)
+            except ValueError:
+                pass
+        elif morsel["expires"]:
+            when = email.utils.parsedate_to_datetime(morsel["expires"]) \
+                if morsel["expires"] else None
+            if when is not None:
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=datetime.timezone.utc)
+                out["expires"] = int(when.timestamp())
+        return out
+    return None
+
+
+def store_set_cookies(headers: list[str], host: str | None = None) -> int:
+    """Write the cookies a reply's Set-Cookie headers carry into
+    storage-state.json, replacing a cookie of the same name and domain, so
+    a session the server refreshed stays fresh on file. Returns how many
+    cookies changed. A cookie the server cleared (Max-Age 0, or an expiry
+    in the past) is dropped. Nothing is written when there is no file: the
+    browser login makes it, and this only keeps it current."""
+    host = (host or app_host(base()) or "").lower()
+    if not headers or not STORAGE_STATE_FILE.is_file():
+        return 0
+    state = _read_storage_state()
+    cookies = [c for c in state.get("cookies", []) if isinstance(c, dict)] \
+        if isinstance(state.get("cookies"), list) else []
+    changed = 0
+    for header in headers:
+        new = _parse_set_cookie(header, host)
+        if not new:
+            continue
+        # The cookie it replaces: the same name and path, on the same domain
+        # or on one that covers this host (a host-only reply cookie stands
+        # in for the leading-dot one the browser saved).
+        domain = new["domain"].lstrip(".")
+        kept = [c for c in cookies
+                if not (str(c.get("name")) == new["name"]
+                        and str(c.get("path") or "/") == new["path"]
+                        and (str(c.get("domain") or "").lstrip(".") == domain
+                             or _cookie_matches(c, host)))]
+        if _cookie_live(new):
+            kept.append(new)
+        cookies = kept
+        changed += 1
+    if not changed:
+        return 0
+    state["cookies"] = cookies
+    state.setdefault("origins", [])
+    try:
+        tmp = STORAGE_STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(STORAGE_STATE_FILE)
+    except OSError as err:
+        print(f"acqai: cookie refresh not saved ({err})", file=sys.stderr,
+              flush=True)
+        return 0
+    return changed
 
 
 def origin_from_endpoint(cfg: dict | None = None) -> str | None:
@@ -350,11 +560,14 @@ def has_session_cookie(header: str | None = None) -> bool:
 
 # --- token freshness: decode the __session JWT exp, warn when stale -----------
 def session_expiry() -> int | None:
-    """Seconds until the captured Clerk __session JWT expires (negative if
-    already expired), or None when absent / unreadable / Aegis-only. Clerk
-    tokens live ~60s; Aegis has no readable exp here, so the browser path is
-    the safe default on portal."""
-    header = cookie_header()
+    """Seconds until the session expires (negative if already expired), or
+    None when nothing says. With MOZI_TOKEN set, that is the Clerk __session
+    JWT's exp, when the header carries one (Clerk tokens live ~60s). With the
+    cookies on file, it is the session cookie's own expiry."""
+    header = os.environ.get("MOZI_TOKEN", "").strip()
+    if not header:
+        exp = session_cookie_expires()
+        return int(exp - time.time()) if exp is not None else None
     m = re.search(r"__session(?:_[A-Za-z0-9]+)?=([^;]+)", header)
     if not m:
         return None
@@ -384,19 +597,28 @@ def _pace() -> None:
     _last_request = time.monotonic()
 
 
+def require_cookie_header() -> str:
+    """The Cookie header a send goes out with, or MoziNoSession when there
+    is none to send with: no cookie on file (and no MOZI_TOKEN), or none
+    that is a session cookie."""
+    header = cookie_header()
+    if not header:
+        raise MoziNoSession(
+            f"no login cookie on file for {base()} ({STORAGE_STATE_FILE}); "
+            f"{CMD} login saves one, or set MOZI_TOKEN to the whole Cookie "
+            "header from a signed-in request")
+    if not has_session_cookie(header):
+        raise MoziNoSession(
+            "the cookies on file carry no Aegis or Clerk session cookie "
+            f"({_AEGIS_TOKEN} or __session); {CMD} login saves a fresh one")
+    return header
+
+
 def _request(method: str, url: str, *, body: bytes | None = None,
              content_type: str = "application/json",
              timeout: int = 90,
              referer: str | None = None) -> tuple[int, bytes]:
-    header = cookie_header()
-    if not header:
-        raise MoziError(
-            "MOZI_TOKEN not set (the whole Cookie header from a logged-in "
-            f"{base()} request, exported in the shell or set in .env)")
-    if not has_session_cookie(header):
-        raise MoziError(
-            "MOZI_TOKEN has no Aegis or Clerk session cookie "
-            f"({_AEGIS_TOKEN} or __session)")
+    header = require_cookie_header()
     headers = {"User-Agent": USER_AGENT, "Cookie": header,
                "Origin": base(),
                "Referer": referer or chat_page_url(),
@@ -408,21 +630,41 @@ def _request(method: str, url: str, *, body: bytes | None = None,
     if body is not None:
         headers["Content-Type"] = content_type
     req = urllib.request.Request(url, data=body, method=method, headers=headers)
+    host = app_host(url)
     _pace()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, resp.read()
+            raw = resp.read()
+            _keep_cookies(resp.headers, host)
+            return resp.status, raw
     except urllib.error.HTTPError as err:
+        _keep_cookies(err.headers, host)
         try:
             why = refusal(err.read())
         except Exception:
             why = ""
         why = f": {why}" if why else ""
-        if err.code in (401, 403, 429):
-            raise MoziBlocked(f"{err.code} from mozi on {url}{why}") from err
+        if err.code in (401, 403):
+            raise MoziNoSession(
+                f"{err.code} from mozi on {url}{why}", err.code) from err
+        if err.code == 429:
+            raise MoziBlocked(f"429 from mozi on {url}{why}", 429) from err
         raise MoziError(f"{err.code} on {url}{why}") from err
     except Exception as err:
         raise MoziError(f"{err} on {url}") from err
+
+
+def _keep_cookies(headers, host: str | None) -> None:
+    """Write a reply's Set-Cookie headers back to the cookies on file. A
+    MOZI_TOKEN send leaves the file alone: that session is the shell's."""
+    if headers is None or os.environ.get("MOZI_TOKEN", "").strip():
+        return
+    try:
+        values = headers.get_all("Set-Cookie") or []
+    except Exception:
+        return
+    if values:
+        store_set_cookies(list(values), host)
 
 
 def refusal(raw: "bytes | str | None") -> str:
@@ -989,14 +1231,21 @@ def ask(question: str, *, chat_id: str | None = None,
             f"no Mozi endpoint learned yet ({ENDPOINT_FILE}). Send one message "
             f"in the window {CMD} login opens, or capture a Copy-as-cURL of a "
             f"real send and run: {CMD} discover --from-curl <file>")
-    exp = session_expiry()
-    if exp is not None and exp < 5:
-        raise MoziBlocked(
-            f"the captured __session looks expired ({exp}s left); Clerk tokens "
-            "live ~60s, so grab a fresh cookie right before the ask (or use the "
-            "browser transport, which never races the token)")
     cid = chat_for_route(chat_id if chat_id is not None else load_chat_id(),
                          cfg)
+    # No session, no request: the caller falls back to the browser before
+    # anything is paced or posted.
+    require_cookie_header()
+    exp = session_expiry()
+    if exp is not None and exp < 5:
+        if os.environ.get("MOZI_TOKEN", "").strip():
+            raise MoziNoSession(
+                f"the captured __session looks expired ({exp}s left); Clerk "
+                "tokens live ~60s, so grab a fresh cookie right before the ask "
+                "(or use the browser transport, which never races the token)")
+        raise MoziNoSession(
+            f"the login cookie on file has expired ({session_expires_text()}); "
+            f"{CMD} login saves a fresh one")
     created = False
     if not cid and is_sandbar(cfg):
         print("acqai: creating portal chat…", file=sys.stderr, flush=True)
