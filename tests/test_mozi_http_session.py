@@ -225,7 +225,7 @@ class SendFallsBack(StateCase):
         self.out = io.StringIO()
         self.hops = []
 
-    def send(self, argv, *, http=None, browser=None):
+    def send(self, argv, *, http=None, browser=None, route=ROUTE):
         import mozi_browser
 
         def hop(args, stdin_text=None):
@@ -236,7 +236,7 @@ class SendFallsBack(StateCase):
                 mock.patch.object(acqai, "ANSWERS", self.answers), \
                 mock.patch.object(acqai, "NAMES_FILE", self.state / "names"), \
                 mock.patch.object(acqai, "_under_venv", side_effect=hop), \
-                mock.patch.object(mozilib, "endpoint", return_value=ROUTE), \
+                mock.patch.object(mozilib, "endpoint", return_value=route), \
                 mock.patch.object(mozilib, "CHAT_ID_FILE", self.state / "chat-id"), \
                 mock.patch.object(mozilib, "ask", side_effect=http), \
                 mock.patch.object(mozi_browser, "send", side_effect=browser), \
@@ -287,6 +287,39 @@ class SendFallsBack(StateCase):
         code = self.send(["send", "Q", "-y", "--browser"], http=http,
                          browser=lambda m, chat_id=None: ("B", None))
         self.assertEqual(code, 0, self.err.getvalue())
+        http.assert_not_called()
+
+    def ask(self, argv, *, route=ROUTE, fresh=True, **kw):
+        """ask with the login fresh (or not) and ready's browser step replaced."""
+        import mozi_browser
+        if fresh:
+            self.save(cookie(AEGIS, "tok"))
+            mozilib.record_send(True, "HTTP")
+        check = mock.Mock()
+        with mock.patch.object(acqai, "_playwright_here", return_value=True), \
+                mock.patch.object(mozi_browser, "STATE_FILE", self.file), \
+                mock.patch.object(mozi_browser, "require_session", check):
+            code = self.send(argv, route=route, **kw)
+        return code, check
+
+    def test_ask_is_ready_then_send_in_one_run(self):
+        code, check = self.ask(
+            ["ask", "Q", "-y"],
+            http=lambda m, chat_id=None, timeout=120: ("A", "c1@portal.acquisition.com"),
+            browser=mock.Mock())
+        self.assertEqual(code, 0, self.err.getvalue())
+        check.assert_not_called()
+        self.assertIn("ready (login cookie expires", self.err.getvalue())
+        self.assertIn("sending via HTTP", self.err.getvalue())
+        self.assertNotIn("ready: ask with", self.out.getvalue(), "no probe dump")
+        filed = next(self.answers.glob("*.md")).read_text(encoding="utf-8")
+        self.assertIn("acqai.py send Q -y", filed, "filed as the send it ran")
+
+    def test_ask_stops_where_ready_stops(self):
+        http = mock.Mock()
+        code, check = self.ask(["ask", "Q", "-y"], route=None, http=http,
+                               browser=mock.Mock())
+        self.assertEqual(code, 1)
         http.assert_not_called()
 
     def test_the_dry_run_names_both_paths(self):

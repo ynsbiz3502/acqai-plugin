@@ -105,8 +105,12 @@ class OverStdio(unittest.TestCase):
         self.assertEqual(init["serverInfo"], {"name": "acqai", "title": "ACQ AI",
                                               "version": version})
         tools = {t["name"]: t for t in r[1]["result"]["tools"]}
-        self.assertEqual(set(tools), {"ready", "login", "send", "wait", "answers",
-                                      "answer", "outcome", "names"})
+        self.assertEqual(set(tools), {"ask", "ready", "login", "send", "wait",
+                                      "answers", "answer", "outcome", "names"})
+        self.assertEqual(set(tools["ask"]["inputSchema"]["properties"]),
+                         {"question", "yes", "new", "continue", "why", "company"})
+        self.assertIn("dry_run", tools["send"]["inputSchema"]["properties"])
+        self.assertIn("ask runs ready", init["instructions"])
         for name, tool in tools.items():
             with self.subTest(tool=name):
                 schema = tool["inputSchema"]
@@ -172,6 +176,32 @@ class OverStdio(unittest.TestCase):
         (job,) = (self.state / "jobs").iterdir()
         self.assertEqual((job / "exit").read_text(), "1")
         self.assertFalse((job / "stdin.txt").exists(), "the question is deleted")
+
+    def test_ask_is_one_job_with_sends_flags_and_needs_yes(self):
+        """ask runs ready, so over stdio with an empty state it would run
+        setup. The mapping is checked in-process instead, with the job
+        replaced."""
+        seen = {}
+
+        def start(argv, stdin_text=None):
+            seen["argv"], seen["stdin"] = argv, stdin_text
+            return "ok\n\n[job x: exit 0]", False
+
+        with mock.patch.object(acqai_mcp, "_start_and_wait", side_effect=start):
+            text, failed = acqai_mcp.tool_ask({
+                "question": "Which lane first?", "yes": True, "new": True,
+                "continue": ANSWER, "why": "The pilot is priced.",
+                "company": "Acme"})
+        self.assertFalse(failed)
+        self.assertEqual(seen["argv"], ["ask", "--file", "-", "--continue", ANSWER,
+                                        "--why", "The pilot is priced.", "--new",
+                                        "--company", "Acme", "-y"])
+        self.assertEqual(seen["stdin"], "Which lane first?")
+        with mock.patch.object(acqai_mcp, "_start_and_wait") as start:
+            with self.assertRaises(acqai_mcp.ToolError) as got:
+                acqai_mcp.tool_ask({"question": "Which lane first?"})
+        self.assertIn("call ask again with yes: true", str(got.exception))
+        start.assert_not_called()
 
     def test_a_ready_dry_run_runs_nothing(self):
         r = self.serve(INIT, call(1, "ready", dry_run=True))

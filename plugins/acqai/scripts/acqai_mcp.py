@@ -80,16 +80,56 @@ def _version() -> str:
 INSTRUCTIONS = (
     "These tools run the acqai commands on the person's own computer, where "
     "their browser holds the ACQ AI login. The acq skill says when to call "
-    "each one. Call ready first on every /acq run. A live send needs yes: "
-    "true, which is the person's yes for that send. ready, login, and a live "
-    "send return within 45 seconds. When a result ends on 'still running', "
-    "call wait with its job until the result ends on an exit code.")
+    "each one. A question is one call: ask runs ready, the send, and the "
+    "wait as one job and returns the answer. Call ready on its own only for "
+    "a bare /acq. A live ask or send needs yes: true, which is the person's "
+    "yes for that send. ask, ready, login, and send return within 45 "
+    "seconds. When a result ends on 'still running', call wait with its job "
+    "until the result ends on an exit code.")
 
 _STR = {"type": "string"}
 _BOOL = {"type": "boolean"}
 _LINES = {"type": "array", "items": {"type": "string"}}
 
+_SEND_INPUTS = {
+    "question": dict(_STR, description=(
+        "The whole question, with the docs that ride with it pasted in.")),
+    "yes": dict(_BOOL, description=(
+        "The person said yes to this send. Required for a live send.")),
+    "new": dict(_BOOL, description="Start a new conversation, for a new topic."),
+    "continue": dict(_STR, description=(
+        "Go on in the conversation an answer on file used: its file name or "
+        "a prefix of it, from the answers tool.")),
+    "why": dict(_STR, description=(
+        "A follow-up's reason, in one line. The answer's file keeps it above "
+        "the message.")),
+}
+
 TOOLS = [
+    {
+        "name": "ask",
+        "title": "Ask ACQ AI (one step)",
+        "description": (
+            "Ask ACQ AI one question as one step: get ready (no browser "
+            "opens while the saved login is fresh), send it over HTTP with "
+            "the saved login (the browser only when that is refused), and "
+            "return the answer. Call it once per question, with yes: true, "
+            "the person's yes for this send, given in chat or by /acq -y. "
+            "No dry run is needed first: the live send stops itself before "
+            "anything goes out on a private name or a chat from the other "
+            "app, and says so. Most answers come back inside the call; when "
+            "the result says the job is still running, call wait with that "
+            "job."),
+        "inputSchema": {
+            "type": "object",
+            "properties": dict(_SEND_INPUTS, company=dict(_STR, description=(
+                "The company to click on ACQ AI's sign-in list, when the "
+                "person belongs to more than one. It is saved for later "
+                "runs."))),
+            "required": ["question"],
+        },
+        "annotations": {"openWorldHint": True},
+    },
     {
         "name": "ready",
         "title": "Get ready for ACQ AI",
@@ -137,32 +177,19 @@ TOOLS = [
         "name": "send",
         "title": "Ask ACQ AI",
         "description": (
-            "Send one question to ACQ AI through the person's signed-in "
-            "browser and return the answer. Run it with dry_run: true first. "
-            "The dry run shows what would go out, and it exits 1 on a NOT "
-            "ready line, such as a private name or a chat on the other app. "
-            "A live send needs yes: true, the person's yes for this send, "
-            "given in chat or by /acq -y. A send paces itself and can take "
-            "two minutes, so when the result says the job is still running, "
-            "call wait with that job."),
+            "Send one question to ACQ AI with the person's saved login and "
+            "return the answer, without the ready step ask runs first. For "
+            "step-by-step use: dry_run: true shows what would go out and "
+            "sends nothing, and it exits 1 on a NOT ready line, such as a "
+            "private name or a chat on the other app. A live send needs "
+            "yes: true, the person's yes for this send, given in chat or by "
+            "/acq -y. A send paces itself and can take two minutes, so when "
+            "the result says the job is still running, call wait with that "
+            "job."),
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "question": dict(_STR, description=(
-                    "The whole question, with the docs that ride with it "
-                    "pasted in.")),
-                "yes": dict(_BOOL, description=(
-                    "The person said yes to this send. Required for a live "
-                    "send.")),
-                "dry_run": dict(_BOOL, description="Show what would go out and send nothing."),
-                "new": dict(_BOOL, description="Start a new conversation, for a new topic."),
-                "continue": dict(_STR, description=(
-                    "Go on in the conversation an answer on file used: its "
-                    "file name or a prefix of it, from the answers tool.")),
-                "why": dict(_STR, description=(
-                    "A follow-up's reason, in one line. The answer's file "
-                    "keeps it above the message.")),
-            },
+            "properties": dict(_SEND_INPUTS, dry_run=dict(_BOOL, description=(
+                "Show what would go out and send nothing."))),
             "required": ["question"],
         },
         "annotations": {"openWorldHint": True},
@@ -501,9 +528,11 @@ def tool_login(args: dict) -> tuple:
     return _start_and_wait(argv + (["--company", company] if company else []))
 
 
-def tool_send(args: dict) -> tuple:
+def _send_argv(command: str, args: dict) -> tuple:
+    """The command line a send or ask takes, and the question for its
+    stdin."""
     question = _text(args, "question", required=True)
-    argv = ["send", "--file", "-"]
+    argv = [command, "--file", "-"]
     cont = _answer(args, "continue")
     why = _text(args, "why")
     if cont:
@@ -512,12 +541,30 @@ def tool_send(args: dict) -> tuple:
         argv += ["--why", why]
     if _get(args, "new", bool):
         argv.append("--new")
-    if _get(args, "dry_run", bool):
-        return _run_now(argv + ["--dry-run"], stdin_text=question)
+    return argv, question
+
+
+def _require_yes(args: dict, tool: str) -> None:
     if not _get(args, "yes", bool):
         raise ToolError(
             "a live send needs the person's yes. Show them the question, and "
-            "once they say yes (or ran /acq -y), call send again with yes: true.")
+            f"once they say yes (or ran /acq -y), call {tool} again with yes: true.")
+
+
+def tool_ask(args: dict) -> tuple:
+    argv, question = _send_argv("ask", args)
+    company = _text(args, "company")
+    if company:
+        argv += ["--company", company]
+    _require_yes(args, "ask")
+    return _start_and_wait(argv + ["-y"], stdin_text=question)
+
+
+def tool_send(args: dict) -> tuple:
+    argv, question = _send_argv("send", args)
+    if _get(args, "dry_run", bool):
+        return _run_now(argv + ["--dry-run"], stdin_text=question)
+    _require_yes(args, "send")
     return _start_and_wait(argv + ["-y"], stdin_text=question)
 
 
@@ -571,6 +618,7 @@ def tool_names(args: dict) -> tuple:
 
 
 HANDLERS = {
+    "ask": tool_ask,
     "ready": tool_ready,
     "login": tool_login,
     "send": tool_send,

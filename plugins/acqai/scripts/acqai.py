@@ -19,6 +19,9 @@ own docs as the context, one paced question at a time, each one on your yes.
                                       names what it would run and runs nothing;
                                       --check opens the headless browser check
                                       even when the saved login looks fresh)
+  acqai.py ask "question" -y          ready, then send, as one step: the way a
+                                      question goes out from Claude (takes every
+                                      send flag below, and --company for ready)
   acqai.py send "question" [-y]       one question, one answer (asks y/N first)
   acqai.py send --file PATH [-y]      the question from a file (- for stdin)
   acqai.py send ["note"] --paste [-y] the question from the clipboard, after an
@@ -804,7 +807,7 @@ def _login_fresh() -> str:
             f"answered {time.strftime('%Y-%m-%d %H:%M', time.localtime(ended))}")
 
 
-def cmd_ready(rest: list) -> int:
+def cmd_ready(rest: list, *, quiet: bool = False) -> int:
     """Everything a send needs, in order, fixing what it can. Playwright:
     setup when it is missing. The login: the cookie on file when it is
     fresh and the last send went through (no browser opens), else a
@@ -878,6 +881,11 @@ def cmd_ready(rest: list) -> int:
             cmd_probe([])
             _say(f"NOT ready: {why}")
             return 1
+    if quiet and not dry:
+        # ask runs this first and goes straight on to the send, so the
+        # state of things is one line here, not the whole probe.
+        _say(f"ready ({_cookie_row()}).")
+        return 0
     cmd_probe([])
     if dry:
         if would:
@@ -890,6 +898,18 @@ def cmd_ready(rest: list) -> int:
         return 0
     print(f'ready: ask with {SELF} send "…" -y')
     return 0
+
+
+def cmd_ask(rest: list) -> int:
+    """ready, then send, as one command: the one step a question takes.
+    Takes send's flags, plus --company for ready. The send goes over HTTP
+    with the saved login, and through the browser only when HTTP has no
+    session, so most asks open no browser at all."""
+    company = _flag_value(rest, "--company")
+    code = cmd_ready(["--company", company] if company else [], quiet=True)
+    if code:
+        return code
+    return cmd_send(rest, ["send", *rest])
 
 
 def _transport_label(http: bool, browser: bool) -> str:
@@ -1245,6 +1265,8 @@ def main(argv: list) -> int:
             return cmd_ready(rest)
         if mode == "send":
             return cmd_send(rest, argv)
+        if mode == "ask":
+            return cmd_ask(rest)
         if mode == "discover":
             return cmd_discover(rest)
         if mode == "answers":
